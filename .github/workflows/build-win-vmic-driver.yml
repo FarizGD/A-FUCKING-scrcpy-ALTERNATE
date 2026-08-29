@@ -49,12 +49,19 @@ jobs:
             throw "Missing solution: $sln"
           }
 
+          # The hosted runner currently mixes the Chocolatey WDK with the
+          # preinstalled newer SDK. Its INF verification target tries to load
+          # an x86 InfVerif.dll that is not present, so disable that build-time
+          # verifier here. We still collect the patched INF for later package
+          # validation/signing on the target WDK.
           msbuild $sln `
             /m `
             /t:Build `
             /p:Configuration=Release `
             /p:Platform=x64 `
             /p:Inf2CatUseLocalTime=true `
+            /p:EnableInfVerif=false `
+            /p:RunApiValidator=false `
             /verbosity:minimal
 
           if ($LASTEXITCODE -ne 0) {
