@@ -1,0 +1,55 @@
+name: Build Windows Virtual Camera Device
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/windows-virtual-camera
+    paths:
+      - 'windows/virtual-camera/**'
+      - '.github/workflows/build-win-vcam-device.yml'
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Setup NuGet
+        uses: NuGet/setup-nuget@v2
+
+      - name: Prepare pinned Media Foundation source
+        shell: pwsh
+        run: .\windows\virtual-camera\bootstrap-camera.ps1
+
+      - name: Restore packages
+        shell: pwsh
+        run: nuget restore .\windows\virtual-camera\VCamSample-src\VCamSample.sln
+
+      - name: Build x64 Release
+        shell: pwsh
+        run: msbuild .\windows\virtual-camera\VCamSample-src\VCamSample.sln /m /p:Configuration=Release /p:Platform=x64
+
+      - name: Collect camera binaries
+        shell: pwsh
+        run: |
+          $out = '.\windows\virtual-camera\dist'
+          New-Item -ItemType Directory -Force $out | Out-Null
+          $dll = Get-ChildItem '.\windows\virtual-camera\VCamSample-src' -Recurse -Filter 'VCamSampleSource.dll' | Select-Object -First 1
+          $exe = Get-ChildItem '.\windows\virtual-camera\VCamSample-src' -Recurse -Filter 'VCamSample.exe' | Select-Object -First 1
+          if (-not $dll) { throw 'VCamSampleSource.dll was not produced' }
+          if (-not $exe) { throw 'VCamSample.exe was not produced' }
+          Copy-Item $dll.FullName "$out\scrcpy-vcam-source.dll"
+          Copy-Item $exe.FullName "$out\scrcpy-vcam-register.exe"
+          Copy-Item '.\windows\virtual-camera\VCAMSAMPLE-LICENSE' "$out\VCAMSAMPLE-LICENSE"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: scrcpy-virtual-camera-device-win64
+          path: windows/virtual-camera/dist/
