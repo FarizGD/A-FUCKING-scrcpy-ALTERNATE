@@ -115,6 +115,12 @@ sc_win_vcam_producer_push(struct sc_win_vcam_producer *producer,
     uint32_t width = producer->width;
     uint32_t height = producer->height;
 
+    // Odd sequence means "writer owns the buffer". Consumers only accept a
+    // stable even sequence before and after their copy, so they cannot publish
+    // a torn frame while scrcpy is replacing the shared NV12 payload.
+    InterlockedIncrement(&header->sequence);
+    MemoryBarrier();
+
     // NV12 = full-size Y plane followed by interleaved UV at half height.
     copy_plane(dst, width, frame->data[0], frame->linesize[0], width, height);
 
