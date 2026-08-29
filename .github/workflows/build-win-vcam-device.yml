@@ -46,6 +46,9 @@ jobs:
           if (-not $exe) { throw 'VCamSample.exe was not produced' }
           Copy-Item $dll.FullName "$out\scrcpy-vcam-source.dll"
           Copy-Item $exe.FullName "$out\scrcpy-vcam-register.exe"
+          Copy-Item '.\windows\virtual-camera\install-camera.ps1' "$out\install-camera.ps1"
+          Copy-Item '.\windows\virtual-camera\uninstall-camera.ps1' "$out\uninstall-camera.ps1"
+          Copy-Item '.\windows\virtual-camera\README.md' "$out\README.md"
           Copy-Item '.\windows\virtual-camera\VCAMSAMPLE-LICENSE' "$out\VCAMSAMPLE-LICENSE"
 
       - name: Upload artifact
