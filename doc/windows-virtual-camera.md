@@ -4,6 +4,42 @@ This branch is for exposing scrcpy's decoded video as a native Windows webcam,
 so applications such as VTube Studio can select it directly without routing
 through OBS first.
 
+## Current implementation status
+
+Milestone 1 is now implemented on the scrcpy producer side:
+
+- Windows video-decoder frames can be published to named shared memory.
+- YUV420P is converted to NV12 without re-encoding.
+- The mapping is `Local\ScrcpyVirtualCameraFrames`.
+- The mapping header contains magic/version, dimensions, stride, FourCC, frame
+  size, sequence number and timestamp.
+- The producer is currently opt-in through `SCRCPY_WIN_VCAM=1` while the Media
+  Foundation consumer is still under development.
+
+Temporary test command on Windows CMD:
+
+```bat
+set SCRCPY_WIN_VCAM=1
+scrcpy --video-source=camera --camera-facing=front --camera-size=1280x720 --camera-fps=30 --no-audio
+```
+
+PowerShell:
+
+```powershell
+$env:SCRCPY_WIN_VCAM = "1"
+.\scrcpy.exe --video-source=camera --camera-facing=front --camera-size=1280x720 --camera-fps=30 --no-audio
+```
+
+Expected log once the decoder opens:
+
+```text
+Windows virtual camera producer ready: 1280x720 NV12 (Local\ScrcpyVirtualCameraFrames)
+```
+
+This milestone alone does **not** make the camera appear in VTube Studio yet.
+The next milestone is the Media Foundation virtual-camera component that reads
+this mapping and exposes `scrcpy Virtual Camera` to Windows camera applications.
+
 ## Goal
 
 ```text
@@ -53,35 +89,18 @@ scrcpy already has the abstraction needed for this. `sc_decoder` publishes
 `AVFrame`s through `sc_frame_source`, and consumers implement `sc_frame_sink`.
 The existing V4L2 implementation is a useful model for lifecycle and buffering.
 
-The Windows implementation should add a sibling sink rather than modifying the
-Android camera capture or decoder itself.
+The first producer milestone currently hooks at the decoder so it can be tested
+without changing scrcpy's large main lifecycle yet. Once the Media Foundation
+consumer is proven, this should be refactored into a proper sibling
+`sc_frame_sink` and enabled through `--virtual-camera`.
 
 Planned client-side pieces:
 
 ```text
-app/src/win_vcam_sink.c
-app/src/win_vcam_sink.h
-app/src/sys/win/vcam_ipc.c
-app/src/sys/win/vcam_ipc.h
+app/src/win_vcam_producer.c
+app/src/win_vcam_producer.h
 windows/virtual-camera/...
 ```
-
-### `sc_win_vcam_sink`
-
-Responsibilities:
-
-1. Implement `sc_frame_sink`.
-2. Accept decoded `AV_PIX_FMT_YUV420P` frames.
-3. Keep only the newest frame when the consumer is late. Camera tracking values
-   low latency more than preserving every frame.
-4. Convert only when the Media Foundation stream asks for a format that cannot
-   consume the decoded format directly.
-5. Publish frames to the Media Foundation camera source through a low-overhead
-   local IPC transport.
-6. Stop cleanly without blocking scrcpy shutdown.
-
-The sink should follow the same producer/consumer pattern as `sc_v4l2_sink`:
-`sc_frame_buffer`, mutex/condition variable, and a dedicated output thread.
 
 ## IPC transport
 
@@ -89,37 +108,26 @@ The Media Foundation camera source may be loaded by Windows Camera Frame Server
 rather than by the scrcpy process. Therefore it must not depend on direct
 in-process pointers to scrcpy frames.
 
-Use a per-instance named shared-memory mapping plus synchronization primitives.
-The mapping header should be versioned so the producer and media source can
-reject incompatible layouts safely.
+The current producer uses a named shared-memory mapping with a versioned header.
+Frames are published as NV12 so the eventual Media Foundation source can avoid
+an additional pixel-format conversion.
 
-Suggested layout:
+Current mapping:
 
-```c
-struct sc_vcam_shared_header {
-    uint32_t magic;
-    uint32_t version;
-    uint32_t width;
-    uint32_t height;
-    uint32_t pixel_format;
-    uint32_t stride[3];
-    uint32_t offset[3];
-    uint64_t sequence;
-    int64_t timestamp_us;
-};
+```text
+Local\ScrcpyVirtualCameraFrames
 ```
 
-Use two frame slots (double buffering). The producer writes into the inactive
-slot and publishes a monotonically increasing sequence number only after the
-frame is complete. The consumer never waits for the producer; if it misses a
-frame, it consumes the latest completed one.
+The producer writes the frame payload, executes a memory barrier, then increments
+a sequence number. Consumers should only treat a new sequence number as a
+completed frame.
 
-Do not send raw frame payloads through a named pipe. A pipe may be used for
-control/handshake messages, while shared memory carries video frames.
+A later revision can move to explicit double buffering if testing shows the
+single latest-frame slot can tear under load.
 
 ## Media Foundation component
 
-The companion DLL implements a custom Media Foundation media source and one
+The companion DLL will implement a custom Media Foundation media source and one
 video stream. Its COM CLSID is registered for the current user, then
 `MFCreateVirtualCamera()` registers a software virtual camera with a friendly
 name such as:
@@ -137,12 +145,9 @@ Initial formats:
 - 1920x1080 @ 30 fps
 - NV12 preferred for Windows camera applications
 
-The producer can continue receiving YUV420P from FFmpeg. Conversion to NV12 is
-cheap because the Y plane is copied unchanged and U/V are interleaved.
-
 ## CLI
 
-Proposed user-facing option:
+Proposed final user-facing option:
 
 ```text
 --virtual-camera
@@ -151,7 +156,7 @@ Proposed user-facing option:
 Optional friendly-name override can be added later if there is a real need.
 Avoid adding unnecessary configuration in the first implementation.
 
-Typical camera command:
+Typical final command:
 
 ```bash
 scrcpy --video-source=camera \
@@ -174,14 +179,14 @@ path deliberately small:
 - no H.264 re-encode on the PC
 - no OBS dependency
 - latest-frame semantics instead of an ever-growing queue
-- one YUV420P -> NV12 conversion only when needed
-- no extra SDL window when `--no-window` is used
+- one YUV420P -> NV12 conversion
+- no extra SDL window when `--no-window` is eventually used
 - no network transport between scrcpy and the virtual-camera component
 
 Desired final path:
 
 ```text
-phone camera -> Android encoder -> scrcpy decoder -> shared frame ->
+phone camera -> Android encoder -> scrcpy decoder -> shared NV12 frame ->
 Media Foundation virtual camera -> VTube Studio -> OBS
 ```
 
@@ -195,7 +200,7 @@ Media Foundation virtual camera -> VTube Studio -> OBS
   emit a black frame or end the stream cleanly instead of retaining stale image
   data.
 - The normal scrcpy display and recording paths must remain unchanged when
-  `--virtual-camera` is not requested.
+  virtual-camera output is not requested.
 
 ## Reference implementation
 
