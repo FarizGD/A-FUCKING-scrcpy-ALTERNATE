@@ -28,13 +28,44 @@ try {
 
     # The pinned AudioMirror source predates current Windows 11 WDK headers.
     # Newer kits emit deprecation warnings (for example ExAllocatePoolWithTag)
-    # that this legacy project promotes to fatal errors. Keep the warnings
-    # visible, but do not fail the development build solely because of them.
+    # and current driver defaults can promote warnings to errors. The upstream
+    # project only overrides TreatWarningAsError for Debug|x64, while CI builds
+    # Release|x64, so add an explicit Release compiler definition here.
     $project = Join-Path $Destination 'AudioMirror\AudioMirror.vcxproj'
     $projectContent = Get-Content $project -Raw
+
+    $releaseItemDefinition = @'
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <DisableSpecificWarnings>4996;4390;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+      <PreprocessorDefinitions>_WIN64;_AMD64_;AMD64;%(PreprocessorDefinitions);_NEW_DELETE_OPERATORS_</PreprocessorDefinitions>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>$(DDK_LIB_PATH)\portcls.lib;$(DDK_LIB_PATH)\stdunk.lib;$(DDK_LIB_PATH)\libcntpr.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+    <DriverSign>
+      <FileDigestAlgorithm>SHA256</FileDigestAlgorithm>
+    </DriverSign>
+  </ItemDefinitionGroup>
+'@
+
+    $marker = '  <ItemGroup>' + [Environment]::NewLine + '    <Inf Include="AudioMirror.inf" />'
+    if (-not $projectContent.Contains($marker)) {
+        throw 'Could not locate AudioMirror INF item in project.'
+    }
+
+    # Insert the Release|x64 overrides immediately before the INF item.
+    $projectContent = $projectContent.Replace($marker, $releaseItemDefinition + $marker)
+
+    # The hosted runner currently combines a newer preinstalled SDK with the
+    # Chocolatey WDK. Its WDK INF build target tries to load x86\InfVerif.dll,
+    # which is absent. Do not run that target during this development compile;
+    # keep the patched INF as a normal project file and package it separately.
     $projectContent = $projectContent.Replace(
-        '<TreatWarningAsError>true</TreatWarningAsError>',
-        '<TreatWarningAsError>false</TreatWarningAsError>')
+        '<Inf Include="AudioMirror.inf" />',
+        '<None Include="AudioMirror.inf" />')
+
     Set-Content -Path $project -Value $projectContent -Encoding utf8
 
     $licenseSource = Join-Path $Destination 'LICENSE.md'
