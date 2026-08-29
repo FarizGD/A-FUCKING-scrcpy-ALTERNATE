@@ -7,7 +7,7 @@
 #include <stdint.h>
 #include <string.h>
 
-#define SCRCPY_VCAM_MAPPING_NAME L"Local\\ScrcpyVirtualCameraFrames"
+#define SCRCPY_VCAM_BACKING_FILE L"C:\\ProgramData\\scrcpy-vcam\\frames.bin"
 #define SCRCPY_VCAM_MAGIC 0x53435643u
 #define SCRCPY_VCAM_VERSION 1u
 #define SCRCPY_VCAM_FOURCC_NV12 0x3231564Eu
@@ -58,9 +58,21 @@ inline HRESULT ScrcpyCopySharedNv12(IMFSample *sample, UINT width, UINT height) 
                                          &scanline, &pitch, &start, &length));
 
     HRESULT hr = S_OK;
-    HANDLE mapping = OpenFileMappingW(FILE_MAP_READ, FALSE,
-                                      SCRCPY_VCAM_MAPPING_NAME);
+    HANDLE backingFile = CreateFileW(SCRCPY_VCAM_BACKING_FILE,
+                                     GENERIC_READ,
+                                     FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                     nullptr, OPEN_EXISTING,
+                                     FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (backingFile == INVALID_HANDLE_VALUE) {
+        hr = ScrcpyFillBlackNv12(scanline, pitch, width, height);
+        buffer2D->Unlock2D();
+        return hr;
+    }
+
+    HANDLE mapping = CreateFileMappingW(backingFile, nullptr,
+                                        PAGE_READONLY, 0, 0, nullptr);
     if (!mapping) {
+        CloseHandle(backingFile);
         hr = ScrcpyFillBlackNv12(scanline, pitch, width, height);
         buffer2D->Unlock2D();
         return hr;
@@ -70,6 +82,7 @@ inline HRESULT ScrcpyCopySharedNv12(IMFSample *sample, UINT width, UINT height) 
                                                    0, 0, 0));
     if (!view) {
         CloseHandle(mapping);
+        CloseHandle(backingFile);
         hr = ScrcpyFillBlackNv12(scanline, pitch, width, height);
         buffer2D->Unlock2D();
         return hr;
@@ -85,6 +98,7 @@ inline HRESULT ScrcpyCopySharedNv12(IMFSample *sample, UINT width, UINT height) 
         hr = ScrcpyFillBlackNv12(scanline, pitch, width, height);
         UnmapViewOfFile(view);
         CloseHandle(mapping);
+        CloseHandle(backingFile);
         buffer2D->Unlock2D();
         return hr;
     }
@@ -122,6 +136,7 @@ inline HRESULT ScrcpyCopySharedNv12(IMFSample *sample, UINT width, UINT height) 
 
     UnmapViewOfFile(view);
     CloseHandle(mapping);
+    CloseHandle(backingFile);
     buffer2D->Unlock2D();
     return hr;
 }
