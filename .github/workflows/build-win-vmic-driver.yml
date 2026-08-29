@@ -1,0 +1,123 @@
+name: Build Windows Virtual Microphone Driver
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/windows-virtual-camera
+    paths:
+      - '.github/workflows/build-win-vmic-driver.yml'
+      - 'windows/virtual-audio/driver/**'
+
+permissions:
+  contents: read
+
+jobs:
+  build-vmic-driver:
+    # VS 2022 + WDK is the known-good combination for this pinned legacy
+    # AudioMirror WaveRT project. windows-latest may move to newer VS images.
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Install Windows Driver Kit
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          choco install windowsdriverkit11 -y --no-progress
+          if ($LASTEXITCODE -ne 0) {
+            throw "WDK installation failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Prepare pinned scrcpy virtual audio driver source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          .\windows\virtual-audio\driver\bootstrap-driver.ps1
+
+      - name: Build Release x64 driver
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sln = '.\windows\virtual-audio\driver\AudioMirror-src\AudioMirror.sln'
+          if (-not (Test-Path $sln)) {
+            throw "Missing solution: $sln"
+          }
+
+          msbuild $sln `
+            /m `
+            /t:Build `
+            /p:Configuration=Release `
+            /p:Platform=x64 `
+            /p:Inf2CatUseLocalTime=true `
+            /verbosity:minimal
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Driver build failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Collect driver package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = '.\windows\virtual-audio\driver\AudioMirror-src'
+          $dest = '.\artifacts\scrcpy-vmic-driver-win64'
+          New-Item -ItemType Directory -Force $dest | Out-Null
+
+          # WDK project layouts differ slightly by kit/toolset version. Locate
+          # the actual generated package instead of depending on one OutDir.
+          $files = Get-ChildItem $root -Recurse -File | Where-Object {
+            $_.Extension -in @('.sys', '.inf', '.cat', '.pdb') -and
+            $_.FullName -match '(?i)(x64|release)'
+          }
+
+          $sys = $files | Where-Object Extension -EQ '.sys' | Select-Object -First 1
+          $inf = $files | Where-Object Extension -EQ '.inf' | Where-Object Name -EQ 'AudioMirror.inf' | Select-Object -First 1
+
+          if (-not $sys) { throw 'No built .sys file was found.' }
+          if (-not $inf) {
+            # The patched source INF itself is still a valid package input if
+            # WDK did not copy it to the output directory.
+            $inf = Get-Item "$root\AudioMirror\AudioMirror.inf"
+          }
+
+          Copy-Item $sys.FullName "$dest\scrcpy-vmic.sys" -Force
+          Copy-Item $inf.FullName "$dest\scrcpy-vmic.inf" -Force
+
+          $cat = $files | Where-Object Extension -EQ '.cat' | Select-Object -First 1
+          if ($cat) { Copy-Item $cat.FullName "$dest\scrcpy-vmic.cat" -Force }
+
+          $pdb = $files | Where-Object Extension -EQ '.pdb' | Select-Object -First 1
+          if ($pdb) { Copy-Item $pdb.FullName "$dest\scrcpy-vmic.pdb" -Force }
+
+          $license = '.\windows\virtual-audio\driver\AUDIOMIRROR-LICENSE.md'
+          if (Test-Path $license) { Copy-Item $license "$dest\AUDIOMIRROR-LICENSE.md" -Force }
+
+          @'
+          scrcpy Virtual Microphone - development WaveRT driver
+
+          This package is a DEVELOPMENT build of the pinned AudioMirror-based
+          WaveRT virtual audio endpoint. It is not production-signed.
+
+          Expected endpoint names after installation:
+            Render/feed: scrcpy Virtual Microphone Feed
+            Capture:     scrcpy Virtual Microphone
+
+          Windows may require Test Signing mode and/or a locally trusted test
+          certificate before this development driver can be installed.
+          '@ | Set-Content "$dest\README.txt" -Encoding UTF8
+
+          Write-Host 'Collected:'
+          Get-ChildItem $dest | Format-Table Name, Length
+
+      - name: Upload driver artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: scrcpy-vmic-driver-win64
+          path: artifacts/scrcpy-vmic-driver-win64/
+          if-no-files-found: error
