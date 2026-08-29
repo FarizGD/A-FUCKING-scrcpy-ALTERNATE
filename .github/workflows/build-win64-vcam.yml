@@ -1,0 +1,112 @@
+name: Build Win64 Virtual Camera
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/windows-virtual-camera
+    paths:
+      - 'app/**'
+      - 'server/**'
+      - 'release/**'
+      - '.github/workflows/build-win64-vcam.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build-server:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: zulu
+          java-version: '17'
+
+      - name: Build scrcpy server
+        env:
+          GRADLE: gradle
+        run: release/build_server.sh
+
+      - name: Upload scrcpy server
+        uses: actions/upload-artifact@v4
+        with:
+          name: scrcpy-server
+          path: release/work/build-server/server/scrcpy-server
+          if-no-files-found: error
+
+  build-win64:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install cross-build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            meson ninja-build nasm ffmpeg \
+            libsdl2-2.0-0 libsdl2-dev \
+            libavcodec-dev libavdevice-dev libavformat-dev \
+            libavutil-dev libswresample-dev \
+            libusb-1.0-0 libusb-1.0-0-dev \
+            mingw-w64 mingw-w64-tools libz-mingw-w64-dev
+
+      - name: Build Win64 client
+        run: release/build_windows.sh 64
+
+      - name: Pack intermediate client
+        run: |
+          cd release/work/build-win64
+          mkdir -p dist-tar
+          tar -C . -czf dist-tar/dist.tar.gz dist/
+
+      - name: Upload Win64 intermediate
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-win64-intermediate
+          path: release/work/build-win64/dist-tar/dist.tar.gz
+          if-no-files-found: error
+
+  package-win64:
+    needs:
+      - build-server
+      - build-win64
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download scrcpy server
+        uses: actions/download-artifact@v4
+        with:
+          name: scrcpy-server
+          path: release/work/build-server/server/
+
+      - name: Download Win64 client
+        uses: actions/download-artifact@v4
+        with:
+          name: build-win64-intermediate
+          path: release/work/build-win64/dist-tar/
+
+      - name: Extract Win64 client
+        run: |
+          cd release/work/build-win64
+          tar -xzf dist-tar/dist.tar.gz
+
+      - name: Package Win64 ZIP
+        env:
+          VERSION: vcam-${{ github.sha }}
+        run: release/package_client.sh win64 zip
+
+      - name: Upload ready-to-run Win64 ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: scrcpy-win64-vcam-${{ github.run_number }}
+          path: release/output/*.zip
+          if-no-files-found: error
+          retention-days: 14
