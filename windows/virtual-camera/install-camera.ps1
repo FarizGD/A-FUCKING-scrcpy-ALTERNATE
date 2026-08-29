@@ -30,36 +30,49 @@ if ($isAdmin) {
 }
 
 # The Media Foundation camera source is loaded by Windows Frame Server in a
-# service context. A Local\\ named mapping created by scrcpy is session-scoped,
-# so the service cannot see it. Provision a file-backed transport under
-# ProgramData instead: the current user can write it and Frame Server service
-# identities can read it across sessions.
+# service context. Provision a file-backed transport under ProgramData so
+# scrcpy and Frame Server can exchange frames across Windows sessions.
 $userSid = $identity.User.Value
 $tempScript = Join-Path $env:TEMP "scrcpy-vcam-elevated-$PID.ps1"
+$setupLog = Join-Path $env:TEMP "scrcpy-vcam-setup-$PID.log"
 $escapedSource = $source.Replace("'", "''")
 $escapedTransport = $transport.Replace("'", "''")
+$escapedLog = $setupLog.Replace("'", "''")
 
 $elevated = @"
 `$ErrorActionPreference = 'Stop'
 `$source = '$escapedSource'
 `$transport = '$escapedTransport'
 `$userSid = '$userSid'
+`$log = '$escapedLog'
 
-New-Item -ItemType Directory -Force `$transport | Out-Null
+try {
+    "Starting elevated scrcpy vcam setup" | Set-Content -Path `$log -Encoding UTF8
+    New-Item -ItemType Directory -Force `$transport | Out-Null
 
-# Remove inherited ACLs, then grant only the identities required for the
-# transport. Numeric SIDs avoid localized account-name problems.
-& icacls.exe `$transport /inheritance:r | Out-Null
-& icacls.exe `$transport /grant:r `
-    "*`$userSid`:(OI)(CI)M" `
-    '*S-1-5-18:(OI)(CI)F' `
-    '*S-1-5-19:(OI)(CI)RX' `
-    '*S-1-5-20:(OI)(CI)RX' `
-    '*S-1-5-32-544:(OI)(CI)F' | Out-Null
-if (`$LASTEXITCODE -ne 0) { throw "icacls failed with exit code `$LASTEXITCODE" }
+    & icacls.exe `$transport /inheritance:r | Tee-Object -FilePath `$log -Append | Out-Null
+    if (`$LASTEXITCODE -ne 0) { throw "icacls inheritance failed with exit code `$LASTEXITCODE" }
 
-& `$env:SystemRoot\System32\regsvr32.exe /s `$source
-if (`$LASTEXITCODE -ne 0) { throw "regsvr32 failed with exit code `$LASTEXITCODE" }
+    # Build the user ACE by concatenation. Using \"`$userSid:\" directly is
+    # ambiguous to PowerShell because ':' has special meaning after variables.
+    `$userAce = '*' + `$userSid + ':(OI)(CI)M'
+    & icacls.exe `$transport /grant:r `
+        `$userAce `
+        '*S-1-5-18:(OI)(CI)F' `
+        '*S-1-5-19:(OI)(CI)RX' `
+        '*S-1-5-20:(OI)(CI)RX' `
+        '*S-1-5-32-544:(OI)(CI)F' 2>&1 | Tee-Object -FilePath `$log -Append | Out-Null
+    if (`$LASTEXITCODE -ne 0) { throw "icacls grant failed with exit code `$LASTEXITCODE" }
+
+    & `$env:SystemRoot\System32\regsvr32.exe /s `$source
+    if (`$LASTEXITCODE -ne 0) { throw "regsvr32 failed with exit code `$LASTEXITCODE" }
+
+    "Elevated setup completed successfully" | Add-Content -Path `$log
+}
+catch {
+    ("ERROR: " + `$_.Exception.Message) | Add-Content -Path `$log
+    exit 1
+}
 "@
 
 Set-Content -Path $tempScript -Value $elevated -Encoding UTF8
@@ -69,6 +82,12 @@ try {
         -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $tempScript + '"')) `
         -Wait -PassThru
     if ($admin.ExitCode -ne 0) {
+        if (Test-Path $setupLog) {
+            Write-Host ''
+            Write-Host 'Elevated setup log:' -ForegroundColor Yellow
+            Get-Content $setupLog | ForEach-Object { Write-Host "  $_" }
+            Write-Host ''
+        }
         throw "Elevated camera setup failed with exit code $($admin.ExitCode)"
     }
 }
@@ -84,3 +103,5 @@ Write-Host 'scrcpy Virtual Camera source registered.'
 Write-Host "Cross-session frame transport: $transport\frames.bin"
 Write-Host 'Keep scrcpy-vcam-register.exe running during this development milestone.'
 Write-Host 'Then start the matching scrcpy build with SCRCPY_WIN_VCAM=1 and 1280x720 camera capture.'
+
+Remove-Item $setupLog -Force -ErrorAction SilentlyContinue
