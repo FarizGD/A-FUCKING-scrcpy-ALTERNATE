@@ -106,13 +106,18 @@ inline HRESULT ScrcpyCopySharedNv12(IMFSample *sample, UINT width, UINT height) 
     const BYTE *src = view + sizeof(ScrcpyVcamSharedHeader);
     bool copied = false;
     for (int attempt = 0; attempt < 4 && !copied; ++attempt) {
-        LONG before = InterlockedCompareExchange(&header->sequence, 0, 0);
+        // The file mapping is read-only in the Media Foundation consumer.
+        // InterlockedCompareExchange() is a read-modify-write operation even
+        // when exchanging the same value, so it can fault on this view. An
+        // aligned 32-bit volatile load is atomic on our Windows x64 target;
+        // barriers prevent reordering around the frame copy.
+        LONG before = header->sequence;
+        MemoryBarrier();
         if (before & 1) {
             Sleep(0);
             continue;
         }
 
-        MemoryBarrier();
         for (UINT y = 0; y < height; ++y) {
             memcpy(scanline + (size_t) y * pitch,
                    src + (size_t) y * width, width);
@@ -126,7 +131,8 @@ inline HRESULT ScrcpyCopySharedNv12(IMFSample *sample, UINT width, UINT height) 
         }
         MemoryBarrier();
 
-        LONG after = InterlockedCompareExchange(&header->sequence, 0, 0);
+        LONG after = header->sequence;
+        MemoryBarrier();
         copied = before == after && !(after & 1);
     }
 
