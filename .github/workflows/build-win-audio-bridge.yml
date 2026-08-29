@@ -1,0 +1,31 @@
+name: Build Windows Virtual Mic Bridge
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/windows-virtual-camera
+    paths:
+      - 'windows/virtual-audio/bridge/**'
+      - '.github/workflows/build-win-audio-bridge.yml'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure
+        shell: pwsh
+        run: cmake -S windows/virtual-audio/bridge -B build/vmic-bridge -A x64
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build build/vmic-bridge --config Release
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: scrcpy-vmic-bridge-win64
+          path: build/vmic-bridge/Release/scrcpy-vmic-bridge.exe
