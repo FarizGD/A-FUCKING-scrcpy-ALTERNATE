@@ -81,16 +81,20 @@ HRESULT MediaStream::SetD3DManager(IUnknown* manager)
     $generator = $generator.Replace($needle, $replacement)
     Set-Content $generatorPath $generator -Encoding utf8
 
-    # The app title passed to MFCreateVirtualCamera becomes the camera's
-    # friendly name. Patch only the resource string, not C++ identifiers.
+    # _title is loaded from IDS_APP_TITLE and is passed to MFCreateVirtualCamera.
+    # Change exactly that visible string so resource filenames/identifiers such
+    # as VCamSample.ico remain untouched.
     $rcPath = "$Destination\VCamSample\VCamSample.rc"
     $rc = Get-Content $rcPath -Raw
-    $rc = $rc.Replace('VCamSample', 'scrcpy Virtual Camera')
-    # Revert resource identifiers accidentally touched by the broad textual
-    # replacement; only user-visible strings should change.
-    $rc = $rc.Replace('IDC_scrcpy Virtual Camera', 'IDC_VCAMSAMPLE')
-    $rc = $rc.Replace('IDI_scrcpy Virtual Camera', 'IDI_VCAMSAMPLE')
-    Set-Content $rcPath $rc -Encoding Unicode
+    $patched = [regex]::Replace(
+        $rc,
+        '(?m)^(\s*IDS_APP_TITLE\s+)"VCamSample"',
+        '$1"scrcpy Virtual Camera"'
+    )
+    if ($patched -eq $rc) {
+        throw 'Could not find IDS_APP_TITLE in VCamSample.rc.'
+    }
+    Set-Content $rcPath $patched -Encoding Unicode
 
     Copy-Item "$Destination\LICENSE" "$PSScriptRoot\VCAMSAMPLE-LICENSE" -Force
 }
