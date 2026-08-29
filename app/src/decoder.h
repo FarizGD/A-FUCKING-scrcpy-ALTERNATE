@@ -9,6 +9,7 @@
 #include "trait/packet_sink.h"
 #ifdef _WIN32
 #include "win_vcam_producer.h"
+#include "win_vmic_sink.h"
 #endif
 
 struct sc_decoder {
@@ -22,6 +23,8 @@ struct sc_decoder {
 #ifdef _WIN32
     struct sc_win_vcam_producer win_vcam;
     bool win_vcam_initialized;
+    struct sc_win_vmic_sink win_vmic;
+    bool win_vmic_initialized;
 #endif
 };
 
