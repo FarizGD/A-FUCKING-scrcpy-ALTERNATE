@@ -11,7 +11,7 @@
 #include <libavcodec/avcodec.h>
 #include <libavutil/frame.h>
 
-#define SC_WIN_VCAM_MAPPING_NAME "Local\\ScrcpyVirtualCameraFrames"
+#define SC_WIN_VCAM_BACKING_FILE "C:\\ProgramData\\scrcpy-vcam\\frames.bin"
 #define SC_WIN_VCAM_MAGIC 0x53435643u /* 'SCVC' */
 #define SC_WIN_VCAM_VERSION 1u
 #define SC_WIN_VCAM_FOURCC_NV12 0x3231564Eu /* 'NV12' */
@@ -29,6 +29,7 @@ struct sc_win_vcam_shared_header {
 };
 
 struct sc_win_vcam_producer {
+    HANDLE backing_file;
     HANDLE mapping;
     uint8_t *view;
     size_t mapping_size;
