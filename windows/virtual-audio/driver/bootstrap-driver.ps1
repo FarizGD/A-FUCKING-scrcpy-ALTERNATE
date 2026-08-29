@@ -26,6 +26,17 @@ try {
     $content = $content.Replace('AudioMirror Drivers', 'scrcpy Virtual Audio Driver')
     Set-Content -Path $inf -Value $content -Encoding ascii
 
+    # The pinned AudioMirror source predates current Windows 11 WDK headers.
+    # Newer kits emit deprecation warnings (for example ExAllocatePoolWithTag)
+    # that this legacy project promotes to fatal errors. Keep the warnings
+    # visible, but do not fail the development build solely because of them.
+    $project = Join-Path $Destination 'AudioMirror\AudioMirror.vcxproj'
+    $projectContent = Get-Content $project -Raw
+    $projectContent = $projectContent.Replace(
+        '<TreatWarningAsError>true</TreatWarningAsError>',
+        '<TreatWarningAsError>false</TreatWarningAsError>')
+    Set-Content -Path $project -Value $projectContent -Encoding utf8
+
     $licenseSource = Join-Path $Destination 'LICENSE.md'
     $licenseDestination = Join-Path $PSScriptRoot 'AUDIOMIRROR-LICENSE.md'
     Copy-Item $licenseSource $licenseDestination -Force
