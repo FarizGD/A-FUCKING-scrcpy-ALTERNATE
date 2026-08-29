@@ -26,8 +26,9 @@ try {
     $content = $content.Replace('AudioMirror Drivers', 'scrcpy Virtual Audio Driver')
     Set-Content -Path $inf -Value $content -Encoding ascii
 
-    Copy-Item (Join-Path $Destination 'LICENSE.md') \
-              (Join-Path $PSScriptRoot 'AUDIOMIRROR-LICENSE.md') -Force
+    $licenseSource = Join-Path $Destination 'LICENSE.md'
+    $licenseDestination = Join-Path $PSScriptRoot 'AUDIOMIRROR-LICENSE.md'
+    Copy-Item $licenseSource $licenseDestination -Force
 }
 finally {
     Pop-Location
