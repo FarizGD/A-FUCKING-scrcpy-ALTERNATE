@@ -18,26 +18,26 @@ $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = [Security.Principal.WindowsPrincipal]::new($identity)
 $isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
-if (-not $isAdmin) {
-    Write-Host 'Administrator permission is required once to register the Media Foundation source.'
-    $args = @(
-        '-NoProfile',
-        '-ExecutionPolicy', 'Bypass',
-        '-File', ('"' + $PSCommandPath + '"')
-    )
-    Start-Process powershell.exe -Verb RunAs -ArgumentList $args -Wait
-    exit $LASTEXITCODE
+if ($isAdmin) {
+    Write-Warning 'Do not run this installer from an Administrator PowerShell.'
+    Write-Warning 'The virtual camera uses CurrentUser access and its registration helper must run unelevated.'
+    Write-Host ''
+    Write-Host 'Open a normal PowerShell window and run:'
+    Write-Host '  Set-ExecutionPolicy -Scope Process Bypass'
+    Write-Host '  .\install-camera.ps1'
+    exit 1
 }
 
-Write-Host 'Registering scrcpy Media Foundation camera source...'
+Write-Host 'Registering scrcpy Media Foundation camera source (UAC prompt expected)...'
 $reg = Start-Process "$env:SystemRoot\System32\regsvr32.exe" `
+    -Verb RunAs `
     -ArgumentList @('/s', ('"' + $source + '"')) `
     -Wait -PassThru
 if ($reg.ExitCode -ne 0) {
     throw "regsvr32 failed with exit code $($reg.ExitCode)"
 }
 
-Write-Host 'Starting scrcpy Virtual Camera registration helper...'
+Write-Host 'Starting scrcpy Virtual Camera registration helper as the current user...'
 Start-Process $helper -WorkingDirectory $PSScriptRoot
 
 Write-Host ''
