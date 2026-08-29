@@ -27,6 +27,7 @@ bool
 sc_win_vcam_producer_init(struct sc_win_vcam_producer *producer,
                           const AVCodecContext *ctx) {
     memset(producer, 0, sizeof(*producer));
+    producer->backing_file = INVALID_HANDLE_VALUE;
 
     if (ctx->pix_fmt != AV_PIX_FMT_YUV420P) {
         LOGW("Windows virtual camera producer expects YUV420P, got pix_fmt=%d",
@@ -48,22 +49,44 @@ sc_win_vcam_producer_init(struct sc_win_vcam_producer *producer,
     }
 
     size_t mapping_size = (size_t) mapping_size64;
-    HANDLE mapping = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL,
-                                        PAGE_READWRITE, 0,
-                                        (DWORD) mapping_size,
-                                        SC_WIN_VCAM_MAPPING_NAME);
-    if (!mapping) {
-        LOGE("Could not create Windows virtual camera mapping (error %lu)",
+    HANDLE backing_file = CreateFileA(SC_WIN_VCAM_BACKING_FILE,
+                                      GENERIC_READ | GENERIC_WRITE,
+                                      FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                      NULL, OPEN_ALWAYS,
+                                      FILE_ATTRIBUTE_NORMAL, NULL);
+    if (backing_file == INVALID_HANDLE_VALUE) {
+        LOGE("Could not open Windows virtual camera transport file %s (error %lu). Run the camera installer first.",
+             SC_WIN_VCAM_BACKING_FILE, GetLastError());
+        return false;
+    }
+
+    LARGE_INTEGER size;
+    size.QuadPart = (LONGLONG) mapping_size;
+    if (!SetFilePointerEx(backing_file, size, NULL, FILE_BEGIN)
+            || !SetEndOfFile(backing_file)) {
+        LOGE("Could not resize Windows virtual camera transport file (error %lu)",
              GetLastError());
+        CloseHandle(backing_file);
+        return false;
+    }
+
+    HANDLE mapping = CreateFileMappingA(backing_file, NULL,
+                                        PAGE_READWRITE, 0,
+                                        (DWORD) mapping_size, NULL);
+    if (!mapping) {
+        LOGE("Could not create Windows virtual camera file mapping (error %lu)",
+             GetLastError());
+        CloseHandle(backing_file);
         return false;
     }
 
     uint8_t *view = MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0,
                                   mapping_size);
     if (!view) {
-        LOGE("Could not map Windows virtual camera memory (error %lu)",
+        LOGE("Could not map Windows virtual camera transport (error %lu)",
              GetLastError());
         CloseHandle(mapping);
+        CloseHandle(backing_file);
         return false;
     }
 
@@ -80,6 +103,7 @@ sc_win_vcam_producer_init(struct sc_win_vcam_producer *producer,
     header->sequence = 0;
     header->timestamp_us = 0;
 
+    producer->backing_file = backing_file;
     producer->mapping = mapping;
     producer->view = view;
     producer->mapping_size = mapping_size;
@@ -88,7 +112,7 @@ sc_win_vcam_producer_init(struct sc_win_vcam_producer *producer,
     producer->enabled = true;
 
     LOGI("Windows virtual camera producer ready: %ux%u NV12 (%s)",
-         producer->width, producer->height, SC_WIN_VCAM_MAPPING_NAME);
+         producer->width, producer->height, SC_WIN_VCAM_BACKING_FILE);
     return true;
 }
 
@@ -140,6 +164,7 @@ sc_win_vcam_producer_push(struct sc_win_vcam_producer *producer,
     header->timestamp_us = sc_win_vcam_timestamp_us();
     MemoryBarrier();
     InterlockedIncrement(&header->sequence);
+    FlushViewOfFile(producer->view, 0);
 
     return true;
 }
@@ -152,6 +177,9 @@ sc_win_vcam_producer_destroy(struct sc_win_vcam_producer *producer) {
 
     UnmapViewOfFile(producer->view);
     CloseHandle(producer->mapping);
+    if (producer->backing_file != INVALID_HANDLE_VALUE) {
+        CloseHandle(producer->backing_file);
+    }
     memset(producer, 0, sizeof(*producer));
     LOGD("Windows virtual camera producer stopped");
 }
