@@ -110,25 +110,26 @@ sc_win_vmic_close(struct sc_win_vmic_sink *sink) {
 
 static void
 sc_win_vmic_copy_frame(struct sc_win_vmic_sink *sink, const AVFrame *frame,
+                       uint32_t src_start, uint32_t count,
                        uint32_t dst_frame) {
     uint32_t channels = sink->channels;
     uint32_t capacity = sink->capacity_frames;
-    uint32_t count = (uint32_t) frame->nb_samples;
     enum AVSampleFormat fmt = (enum AVSampleFormat) frame->format;
 
     for (uint32_t i = 0; i < count; ++i) {
+        uint32_t src_frame = src_start + i;
         uint32_t out_frame = (dst_frame + i) % capacity;
         float *dst = &sink->samples[(size_t) out_frame * channels];
 
         if (fmt == AV_SAMPLE_FMT_FLT) {
             const float *src = (const float *) frame->extended_data[0]
-                             + (size_t) i * channels;
+                             + (size_t) src_frame * channels;
             memcpy(dst, src, channels * sizeof(float));
         } else {
             assert(fmt == AV_SAMPLE_FMT_FLTP);
             for (uint32_t ch = 0; ch < channels; ++ch) {
                 const float *plane = (const float *) frame->extended_data[ch];
-                dst[ch] = plane[i];
+                dst[ch] = plane[src_frame];
             }
         }
     }
@@ -146,15 +147,18 @@ sc_win_vmic_push(struct sc_win_vmic_sink *sink, const AVFrame *frame) {
         return false;
     }
 
-    uint32_t count = (uint32_t) frame->nb_samples;
+    uint32_t original_count = (uint32_t) frame->nb_samples;
+    uint32_t count = original_count;
+    uint32_t src_start = 0;
     if (count > sink->capacity_frames) {
         // Keep only the newest part if a pathological frame is larger than the
         // whole ring buffer.
         count = sink->capacity_frames;
+        src_start = original_count - count;
     }
 
     uint32_t write_frame = (uint32_t) sink->header->write_frame;
-    sc_win_vmic_copy_frame(sink, frame, write_frame);
+    sc_win_vmic_copy_frame(sink, frame, src_start, count, write_frame);
 
     uint32_t next = (write_frame + count) % sink->capacity_frames;
 
