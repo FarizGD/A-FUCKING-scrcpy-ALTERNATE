@@ -6,6 +6,8 @@
 #ifdef _WIN32
 #include <stdlib.h>
 #include <string.h>
+// Temporary until the Windows producer is added to Meson's source list.
+#include "win_vcam_producer.c"
 #endif
 
 #include "util/log.h"
