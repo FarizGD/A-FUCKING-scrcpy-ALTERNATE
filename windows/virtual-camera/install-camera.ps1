@@ -46,23 +46,29 @@ $elevated = @"
 `$userSid = '$userSid'
 `$log = '$escapedLog'
 
+function Invoke-IcaclsGrant([string]`$ace) {
+    ("Granting ACL: " + `$ace) | Add-Content -Path `$log
+    & icacls.exe `$transport /grant:r `$ace 2>&1 | Tee-Object -FilePath `$log -Append | Out-Null
+    if (`$LASTEXITCODE -ne 0) {
+        throw "icacls grant failed for `$ace with exit code `$LASTEXITCODE"
+    }
+}
+
 try {
     "Starting elevated scrcpy vcam setup" | Set-Content -Path `$log -Encoding UTF8
     New-Item -ItemType Directory -Force `$transport | Out-Null
 
-    & icacls.exe `$transport /inheritance:r | Tee-Object -FilePath `$log -Append | Out-Null
+    & icacls.exe `$transport /inheritance:r 2>&1 | Tee-Object -FilePath `$log -Append | Out-Null
     if (`$LASTEXITCODE -ne 0) { throw "icacls inheritance failed with exit code `$LASTEXITCODE" }
 
-    # Build the user ACE by concatenation. Using \"`$userSid:\" directly is
-    # ambiguous to PowerShell because ':' has special meaning after variables.
+    # Apply one ACE per icacls invocation. This avoids PowerShell/native argv
+    # parsing ambiguities when several SID expressions contain parentheses.
     `$userAce = '*' + `$userSid + ':(OI)(CI)M'
-    & icacls.exe `$transport /grant:r `
-        `$userAce `
-        '*S-1-5-18:(OI)(CI)F' `
-        '*S-1-5-19:(OI)(CI)RX' `
-        '*S-1-5-20:(OI)(CI)RX' `
-        '*S-1-5-32-544:(OI)(CI)F' 2>&1 | Tee-Object -FilePath `$log -Append | Out-Null
-    if (`$LASTEXITCODE -ne 0) { throw "icacls grant failed with exit code `$LASTEXITCODE" }
+    Invoke-IcaclsGrant `$userAce
+    Invoke-IcaclsGrant '*S-1-5-18:(OI)(CI)F'
+    Invoke-IcaclsGrant '*S-1-5-19:(OI)(CI)RX'
+    Invoke-IcaclsGrant '*S-1-5-20:(OI)(CI)RX'
+    Invoke-IcaclsGrant '*S-1-5-32-544:(OI)(CI)F'
 
     & `$env:SystemRoot\System32\regsvr32.exe /s `$source
     if (`$LASTEXITCODE -ne 0) { throw "regsvr32 failed with exit code `$LASTEXITCODE" }
