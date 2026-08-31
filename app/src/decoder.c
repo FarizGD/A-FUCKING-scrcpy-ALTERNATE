@@ -3,6 +3,13 @@
 #include <errno.h>
 #include <libavcodec/packet.h>
 #include <libavutil/avutil.h>
+#ifdef _WIN32
+#include <stdlib.h>
+#include <string.h>
+// Temporary until the Windows producers are added to Meson's source list.
+#include "win_vcam_producer.c"
+#include "win_vmic_sink.c"
+#endif
 
 #include "util/log.h"
 
@@ -22,6 +29,41 @@ sc_decoder_open(struct sc_decoder *decoder, AVCodecContext *ctx) {
         return false;
     }
 
+#ifdef _WIN32
+    decoder->win_vcam_initialized = false;
+    decoder->win_vmic_initialized = false;
+
+    const char *win_vcam = getenv("SCRCPY_WIN_VCAM");
+    if (!strcmp(decoder->name, "video") && win_vcam && win_vcam[0]
+            && strcmp(win_vcam, "0")) {
+        if (!sc_win_vcam_producer_init(&decoder->win_vcam, ctx)) {
+            LOGE("Could not initialize Windows virtual camera producer");
+            sc_frame_source_sinks_close(&decoder->frame_source);
+            av_frame_free(&decoder->frame);
+            return false;
+        }
+        decoder->win_vcam_initialized = true;
+    }
+
+    const char *win_vmic = getenv("SCRCPY_WIN_VMIC");
+    if (!strcmp(decoder->name, "audio") && win_vmic && win_vmic[0]
+            && strcmp(win_vmic, "0")) {
+        sc_win_vmic_sink_init(&decoder->win_vmic);
+        if (!decoder->win_vmic.frame_sink.ops->open(
+                &decoder->win_vmic.frame_sink, ctx)) {
+            LOGE("Could not initialize Windows virtual microphone producer");
+            if (decoder->win_vcam_initialized) {
+                sc_win_vcam_producer_destroy(&decoder->win_vcam);
+                decoder->win_vcam_initialized = false;
+            }
+            sc_frame_source_sinks_close(&decoder->frame_source);
+            av_frame_free(&decoder->frame);
+            return false;
+        }
+        decoder->win_vmic_initialized = true;
+    }
+#endif
+
     decoder->ctx = ctx;
 
     return true;
@@ -29,6 +71,17 @@ sc_decoder_open(struct sc_decoder *decoder, AVCodecContext *ctx) {
 
 static void
 sc_decoder_close(struct sc_decoder *decoder) {
+#ifdef _WIN32
+    if (decoder->win_vmic_initialized) {
+        decoder->win_vmic.frame_sink.ops->close(&decoder->win_vmic.frame_sink);
+        sc_win_vmic_sink_destroy(&decoder->win_vmic);
+        decoder->win_vmic_initialized = false;
+    }
+    if (decoder->win_vcam_initialized) {
+        sc_win_vcam_producer_destroy(&decoder->win_vcam);
+        decoder->win_vcam_initialized = false;
+    }
+#endif
     sc_frame_source_sinks_close(&decoder->frame_source);
     av_frame_free(&decoder->frame);
 }
@@ -59,6 +112,24 @@ sc_decoder_push(struct sc_decoder *decoder, const AVPacket *packet) {
                  decoder->name, ret);
             return false;
         }
+
+#ifdef _WIN32
+        if (decoder->win_vcam_initialized
+                && !sc_win_vcam_producer_push(&decoder->win_vcam,
+                                               decoder->frame)) {
+            LOGE("Could not publish frame to Windows virtual camera producer");
+            av_frame_unref(decoder->frame);
+            return false;
+        }
+
+        if (decoder->win_vmic_initialized
+                && !decoder->win_vmic.frame_sink.ops->push(
+                    &decoder->win_vmic.frame_sink, decoder->frame)) {
+            LOGE("Could not publish audio to Windows virtual microphone producer");
+            av_frame_unref(decoder->frame);
+            return false;
+        }
+#endif
 
         // a frame was received
         bool ok = sc_frame_source_sinks_push(&decoder->frame_source,
@@ -96,6 +167,10 @@ void
 sc_decoder_init(struct sc_decoder *decoder, const char *name) {
     decoder->name = name; // statically allocated
     sc_frame_source_init(&decoder->frame_source);
+#ifdef _WIN32
+    decoder->win_vcam_initialized = false;
+    decoder->win_vmic_initialized = false;
+#endif
 
     static const struct sc_packet_sink_ops ops = {
         .open = sc_decoder_packet_sink_open,

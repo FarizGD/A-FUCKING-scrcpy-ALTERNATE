@@ -1,0 +1,120 @@
+name: Build Windows Background Camera + VB-CABLE Bridges
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/windows-virtual-camera
+    paths:
+      - 'windows/virtual-camera/**'
+      - 'windows/virtual-audio/bridge/**'
+      - 'windows/bridge-service/**'
+      - '.github/workflows/build-win-background-bridges.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Setup NuGet
+        uses: NuGet/setup-nuget@v2
+
+      - name: Prepare virtual camera source
+        shell: pwsh
+        run: .\windows\virtual-camera\bootstrap-camera.ps1
+
+      - name: Restore camera packages
+        shell: pwsh
+        run: nuget restore .\windows\virtual-camera\VCamSample-src\VCamSample.sln
+
+      - name: Build virtual camera
+        shell: pwsh
+        run: msbuild .\windows\virtual-camera\VCamSample-src\VCamSample.sln /m /p:Configuration=Release /p:Platform=x64
+
+      - name: Configure microphone bridge
+        shell: pwsh
+        run: cmake -S windows/virtual-audio/bridge -B build/vmic-bridge -A x64
+
+      - name: Build microphone bridge
+        shell: pwsh
+        run: cmake --build build/vmic-bridge --config Release
+
+      - name: Configure background service
+        shell: pwsh
+        run: cmake -S windows/bridge-service -B build/bridge-service -A x64
+
+      - name: Build background service
+        shell: pwsh
+        run: cmake --build build/bridge-service --config Release
+
+      - name: Collect unified package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = '.\artifacts\scrcpy-background-bridges-win64'
+          New-Item -ItemType Directory -Force $out | Out-Null
+
+          $dll = Get-ChildItem '.\windows\virtual-camera\VCamSample-src' -Recurse -Filter 'VCamSampleSource.dll' -File | Select-Object -First 1
+          $cam = Get-ChildItem '.\windows\virtual-camera\VCamSample-src' -Recurse -Filter 'VCamSample.exe' -File | Select-Object -First 1
+          if (-not $dll) { throw 'VCamSampleSource.dll was not produced.' }
+          if (-not $cam) { throw 'VCamSample.exe was not produced.' }
+
+          Copy-Item $dll.FullName "$out\scrcpy-vcam-source.dll" -Force
+          Copy-Item $cam.FullName "$out\scrcpy-vcam-register.exe" -Force
+          Copy-Item '.\build\vmic-bridge\Release\scrcpy-vmic-bridge.exe' $out -Force
+          Copy-Item '.\build\bridge-service\Release\scrcpy-bridge-service.exe' $out -Force
+          Copy-Item '.\windows\virtual-camera\install-camera.ps1' $out -Force
+          Copy-Item '.\windows\virtual-camera\uninstall-camera.ps1' $out -Force
+          Copy-Item '.\windows\bridge-service\install-service.ps1' $out -Force
+          Copy-Item '.\windows\bridge-service\uninstall-service.ps1' $out -Force
+          Copy-Item '.\windows\virtual-camera\VCAMSAMPLE-LICENSE' $out -Force
+
+          @'
+          scrcpy background camera + microphone bridges (Windows x64)
+
+          Camera:
+            scrcpy-vcam-register.exe --headless
+            Maintains the CurrentUser Media Foundation virtual camera in the
+            interactive desktop session.
+
+          Microphone:
+            scrcpy-vmic-bridge.exe "CABLE Input"
+            Sends scrcpy's Local\ScrcpyVirtualMicrophonePcm stream to the
+            VB-Audio Virtual Cable playback endpoint. Apps should capture from
+            CABLE Output (VB-Audio Virtual Cable).
+
+          Background service:
+            ScrcpyBridgeService runs as LocalSystem only as a supervisor. It
+            launches both workers into the active logged-in user's session so
+            they can access the Local\ mapping, the user's WASAPI endpoints,
+            and CurrentUser Media Foundation camera registration.
+
+          Setup:
+            1. Install VB-CABLE first and verify "CABLE Input" exists under Playback.
+            2. From a NORMAL (non-admin) PowerShell, run install-camera.ps1 once.
+               Close the visible registration helper it starts afterward.
+            3. From Administrator PowerShell, run install-service.ps1.
+            4. Start the matching scrcpy build with SCRCPY_WIN_VCAM=1 and
+               SCRCPY_WIN_VMIC=1. The service will attach/retry automatically.
+
+          The mic service no longer needs the custom scrcpy WaveRT virtual audio
+          driver when VB-CABLE is used.
+          '@ | Set-Content "$out\README.txt" -Encoding UTF8
+
+          Get-ChildItem $out | Format-Table Name, Length
+
+      - name: Upload unified artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: scrcpy-background-bridges-win64
+          path: artifacts/scrcpy-background-bridges-win64/
+          if-no-files-found: error

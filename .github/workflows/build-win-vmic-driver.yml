@@ -1,0 +1,277 @@
+name: Build Windows Virtual Microphone Driver
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/windows-virtual-camera
+    paths:
+      - '.github/workflows/build-win-vmic-driver.yml'
+      - 'windows/virtual-audio/driver/**'
+      - 'windows/virtual-audio/bridge/**'
+
+permissions:
+  contents: read
+
+jobs:
+  build-vmic-driver:
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Install Windows Driver Kit
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          choco install windowsdriverkit11 -y --no-progress
+          if ($LASTEXITCODE -ne 0) {
+            throw "WDK installation failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Prepare pinned scrcpy virtual audio driver source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          .\windows\virtual-audio\driver\bootstrap-driver.ps1
+
+      - name: Build Release x64 driver
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sln = '.\windows\virtual-audio\driver\AudioMirror-src\AudioMirror.sln'
+          if (-not (Test-Path $sln)) {
+            throw "Missing solution: $sln"
+          }
+
+          msbuild $sln `
+            /m `
+            /t:Build `
+            /p:Configuration=Release `
+            /p:Platform=x64 `
+            /p:Inf2CatUseLocalTime=true `
+            /p:EnableInfVerif=false `
+            /p:RunApiValidator=false `
+            /verbosity:minimal
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Driver build failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Build virtual microphone bridge
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cmake -S windows/virtual-audio/bridge -B build/vmic-bridge -A x64
+          if ($LASTEXITCODE -ne 0) {
+            throw "Bridge configure failed with exit code $LASTEXITCODE"
+          }
+
+          cmake --build build/vmic-bridge --config Release
+          if ($LASTEXITCODE -ne 0) {
+            throw "Bridge build failed with exit code $LASTEXITCODE"
+          }
+
+          $bridge = '.\build\vmic-bridge\Release\scrcpy-vmic-bridge.exe'
+          if (-not (Test-Path $bridge)) {
+            throw "Bridge executable was not created: $bridge"
+          }
+
+      - name: Collect and normalize test driver package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $root = '.\windows\virtual-audio\driver\AudioMirror-src'
+          $dest = '.\artifacts\scrcpy-vmic-driver-win64'
+          New-Item -ItemType Directory -Force $dest | Out-Null
+
+          $sys = Get-ChildItem $root -Recurse -Filter AudioMirror.sys -File |
+            Where-Object { $_.FullName -match '(?i)(x64|release)' } |
+            Select-Object -First 1
+          if (-not $sys) { throw 'No built AudioMirror.sys was found.' }
+
+          Copy-Item $sys.FullName "$dest\scrcpy-vmic.sys" -Force
+
+          $sourceInf = "$root\AudioMirror\AudioMirror.inf"
+          if (-not (Test-Path $sourceInf)) { throw "Missing source INF: $sourceInf" }
+          $infText = Get-Content $sourceInf -Raw
+
+          # Build-time INF processing is disabled because the hosted runner's
+          # mixed SDK/WDK install has a broken InfVerif target. Finalize the
+          # package INF explicitly here instead.
+          $infText = $infText.Replace('CatalogFile=AudioMirror.cat', 'CatalogFile=scrcpy-vmic.cat')
+          $infText = $infText.Replace('AudioMirror.sys', 'scrcpy-vmic.sys')
+          $infText = $infText.Replace('NT$ARCH$', 'NTamd64')
+
+          $kitsRoot = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows Kits\Installed Roots' -Name KitsRoot10).KitsRoot10
+          $kmdfRoots = @(
+            (Join-Path $kitsRoot 'Include\wdf\kmdf'),
+            (Join-Path $kitsRoot 'Include\10.0.26100.0\wdf\kmdf')
+          ) | Where-Object { Test-Path $_ }
+
+          $kmdf = $kmdfRoots |
+            ForEach-Object { Get-ChildItem $_ -Directory -ErrorAction SilentlyContinue } |
+            Where-Object { $_.Name -match '^\d+\.\d+$' } |
+            Sort-Object { [version]$_.Name } -Descending |
+            Select-Object -First 1
+
+          if (-not $kmdf) {
+            $kmdfVersion = '1.33'
+          }
+          else {
+            $kmdfVersion = $kmdf.Name
+          }
+          Write-Host "Using KMDF version: $kmdfVersion"
+          $infText = $infText.Replace('$KMDFVERSION$', $kmdfVersion)
+
+          $driverDate = Get-Date -Format 'MM/dd/yyyy'
+          $driverVersion = "1.0.$env:GITHUB_RUN_NUMBER.0"
+          $infText = [regex]::Replace(
+            $infText,
+            '(?m)^DriverVer\s*=.*$',
+            "DriverVer=$driverDate,$driverVersion")
+
+          Set-Content "$dest\scrcpy-vmic.inf" -Value $infText -Encoding ascii
+
+          $pdb = Get-ChildItem $root -Recurse -Filter AudioMirror.pdb -File |
+            Where-Object { $_.FullName -match '(?i)(x64|release)' } |
+            Select-Object -First 1
+          if ($pdb) { Copy-Item $pdb.FullName "$dest\scrcpy-vmic.pdb" -Force }
+
+          Copy-Item '.\windows\virtual-audio\driver\install-driver.ps1' "$dest\install-driver.ps1" -Force
+
+          $bridge = '.\build\vmic-bridge\Release\scrcpy-vmic-bridge.exe'
+          Copy-Item $bridge "$dest\scrcpy-vmic-bridge.exe" -Force
+
+          $license = '.\windows\virtual-audio\driver\AUDIOMIRROR-LICENSE.md'
+          if (Test-Path $license) { Copy-Item $license "$dest\AUDIOMIRROR-LICENSE.md" -Force }
+
+      - name: Create ephemeral test certificate and sign driver
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dest = (Resolve-Path '.\artifacts\scrcpy-vmic-driver-win64').Path
+
+          $cert = New-SelfSignedCertificate `
+            -Type CodeSigningCert `
+            -Subject 'CN=scrcpy Virtual Microphone Test Driver' `
+            -CertStoreLocation 'Cert:\LocalMachine\My' `
+            -KeyExportPolicy Exportable `
+            -KeyLength 2048 `
+            -HashAlgorithm SHA256 `
+            -NotAfter (Get-Date).AddYears(2)
+
+          Export-Certificate -Cert $cert -FilePath "$dest\scrcpy-vmic-test.cer" -Force | Out-Null
+
+          Import-Certificate -FilePath "$dest\scrcpy-vmic-test.cer" -CertStoreLocation 'Cert:\LocalMachine\Root' | Out-Null
+          Import-Certificate -FilePath "$dest\scrcpy-vmic-test.cer" -CertStoreLocation 'Cert:\LocalMachine\TrustedPublisher' | Out-Null
+
+          $kitsRoot = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows Kits\Installed Roots' -Name KitsRoot10).KitsRoot10
+          $signtool = Get-ChildItem (Join-Path $kitsRoot 'bin') -Recurse -Filter signtool.exe -File |
+            Where-Object { $_.FullName -match '(?i)\\x64\\signtool\.exe$' } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $signtool) { throw 'signtool.exe was not found in the Windows Kits installation.' }
+
+          Write-Host "Using SignTool: $($signtool.FullName)"
+          & $signtool.FullName sign /v /fd SHA256 /s My /sm /sha1 $cert.Thumbprint "$dest\scrcpy-vmic.sys"
+          if ($LASTEXITCODE -ne 0) { throw "SignTool failed to sign scrcpy-vmic.sys: $LASTEXITCODE" }
+
+          "SCRCPY_VMIC_CERT_THUMBPRINT=$($cert.Thumbprint)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "SCRCPY_VMIC_SIGNTOOL=$($signtool.FullName)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Generate and sign catalog
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dest = (Resolve-Path '.\artifacts\scrcpy-vmic-driver-win64').Path
+          $kitsRoot = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows Kits\Installed Roots' -Name KitsRoot10).KitsRoot10
+
+          $inf2cat = Get-ChildItem (Join-Path $kitsRoot 'bin') -Recurse -Filter Inf2Cat.exe -File |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $inf2cat) { throw 'Inf2Cat.exe was not found in the Windows Kits installation.' }
+
+          Write-Host "Using Inf2Cat: $($inf2cat.FullName)"
+          & $inf2cat.FullName "/driver:$dest" /os:10_X64
+          if ($LASTEXITCODE -ne 0) { throw "Inf2Cat failed with exit code $LASTEXITCODE" }
+
+          $cat = Join-Path $dest 'scrcpy-vmic.cat'
+          if (-not (Test-Path $cat)) { throw "Inf2Cat did not create expected catalog: $cat" }
+
+          & $env:SCRCPY_VMIC_SIGNTOOL sign /v /fd SHA256 /s My /sm /sha1 $env:SCRCPY_VMIC_CERT_THUMBPRINT $cat
+          if ($LASTEXITCODE -ne 0) { throw "SignTool failed to sign scrcpy-vmic.cat: $LASTEXITCODE" }
+
+          & $env:SCRCPY_VMIC_SIGNTOOL verify /v /pa "$dest\scrcpy-vmic.sys"
+          if ($LASTEXITCODE -ne 0) { throw 'Embedded driver signature verification failed.' }
+
+          & $env:SCRCPY_VMIC_SIGNTOOL verify /v /pa $cat
+          if ($LASTEXITCODE -ne 0) { throw 'Catalog signature verification failed.' }
+
+      - name: Finalize package documentation
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dest = '.\artifacts\scrcpy-vmic-driver-win64'
+
+          @'
+          scrcpy Virtual Microphone - TEST-SIGNED development WaveRT driver
+
+          This package is automatically signed with an ephemeral self-signed
+          certificate generated by GitHub Actions. It is NOT production-signed
+          or Microsoft-attested.
+
+          Required for installation:
+            1. Secure Boot disabled in UEFI.
+            2. Windows Test Signing mode enabled:
+                 bcdedit /set testsigning on
+               then reboot.
+            3. Run install-driver.ps1 from Administrator PowerShell.
+
+          Package files:
+            scrcpy-vmic.inf
+            scrcpy-vmic.sys
+            scrcpy-vmic.cat
+            scrcpy-vmic-test.cer
+            install-driver.ps1
+            scrcpy-vmic-bridge.exe
+
+          Expected endpoints:
+            Capture:     scrcpy Virtual Microphone
+            Render/feed: scrcpy Virtual Microphone Feed
+
+          After the virtual audio device is installed and scrcpy is producing
+          microphone PCM, run:
+            .\scrcpy-vmic-bridge.exe "scrcpy Virtual Microphone Feed"
+
+          The certificate is unique to this CI run. Trust it only on machines
+          where you intentionally want to test this development driver.
+          '@ | Set-Content "$dest\README.txt" -Encoding UTF8
+
+          Write-Host 'Final package:'
+          Get-ChildItem $dest | Format-Table Name, Length
+
+          foreach ($required in @(
+            'scrcpy-vmic.inf',
+            'scrcpy-vmic.sys',
+            'scrcpy-vmic.cat',
+            'scrcpy-vmic-test.cer',
+            'install-driver.ps1',
+            'scrcpy-vmic-bridge.exe'
+          )) {
+            if (-not (Test-Path (Join-Path $dest $required))) {
+              throw "Required artifact file is missing: $required"
+            }
+          }
+
+      - name: Upload driver artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: scrcpy-vmic-driver-win64
+          path: artifacts/scrcpy-vmic-driver-win64/
+          if-no-files-found: error
