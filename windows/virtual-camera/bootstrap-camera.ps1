@@ -96,6 +96,52 @@ HRESULT MediaStream::SetD3DManager(IUnknown* manager)
     }
     Set-Content $rcPath $patched -Encoding Unicode
 
+    # Add a --headless mode for the background bridge service. MF virtual
+    # cameras with CurrentUser access must be created from the interactive user
+    # session, so the service launches this worker there instead of Session 0.
+    $appPath = "$Destination\VCamSample\VCamSample.cpp"
+    $app = Get-Content $appPath -Raw
+
+    $showNeedle = 'ShowWindow(hwnd, cmd);'
+    if (-not $app.Contains($showNeedle)) {
+        throw 'Could not locate ShowWindow in VCamSample.cpp.'
+    }
+    $app = $app.Replace(
+        $showNeedle,
+        'ShowWindow(hwnd, wcsstr(GetCommandLineW(), L"--headless") ? SW_HIDE : cmd);')
+
+    $successPattern = '(?s)(config\.pszMainIcon\s*=\s*TD_INFORMATION_ICON;\s*)TaskDialogIndirect\(&config, nullptr, nullptr, nullptr\);'
+    $successReplacement = @'
+$1if (wcsstr(GetCommandLineW(), L"--headless"))
+				{
+					// The service owns this process lifetime. Session-lifetime virtual
+					// camera registration disappears when the worker is terminated.
+					Sleep(INFINITE);
+				}
+				else
+				{
+					TaskDialogIndirect(&config, nullptr, nullptr, nullptr);
+				}
+'@
+    $headlessPatched = [regex]::Replace($app, $successPattern, $successReplacement, 1)
+    if ($headlessPatched -eq $app) {
+        throw 'Could not patch successful VCam TaskDialog for headless mode.'
+    }
+    $app = $headlessPatched
+
+    $errorPattern = '(?s)(config\.pszMainIcon\s*=\s*TD_ERROR_ICON;\s*)TaskDialogIndirect\(&config, nullptr, nullptr, nullptr\);'
+    $errorReplacement = @'
+$1if (!wcsstr(GetCommandLineW(), L"--headless"))
+				{
+					TaskDialogIndirect(&config, nullptr, nullptr, nullptr);
+				}
+'@
+    $errorPatched = [regex]::Replace($app, $errorPattern, $errorReplacement, 1)
+    if ($errorPatched -eq $app) {
+        throw 'Could not patch failed VCam TaskDialog for headless mode.'
+    }
+    Set-Content $appPath $errorPatched -Encoding utf8
+
     Copy-Item "$Destination\LICENSE" "$PSScriptRoot\VCAMSAMPLE-LICENSE" -Force
 }
 finally {
