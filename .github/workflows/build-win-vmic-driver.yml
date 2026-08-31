@@ -8,6 +8,7 @@ on:
     paths:
       - '.github/workflows/build-win-vmic-driver.yml'
       - 'windows/virtual-audio/driver/**'
+      - 'windows/virtual-audio/bridge/**'
 
 permissions:
   contents: read
@@ -61,6 +62,25 @@ jobs:
             throw "Driver build failed with exit code $LASTEXITCODE"
           }
 
+      - name: Build virtual microphone bridge
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cmake -S windows/virtual-audio/bridge -B build/vmic-bridge -A x64
+          if ($LASTEXITCODE -ne 0) {
+            throw "Bridge configure failed with exit code $LASTEXITCODE"
+          }
+
+          cmake --build build/vmic-bridge --config Release
+          if ($LASTEXITCODE -ne 0) {
+            throw "Bridge build failed with exit code $LASTEXITCODE"
+          }
+
+          $bridge = '.\build\vmic-bridge\Release\scrcpy-vmic-bridge.exe'
+          if (-not (Test-Path $bridge)) {
+            throw "Bridge executable was not created: $bridge"
+          }
+
       - name: Collect and normalize test driver package
         shell: pwsh
         run: |
@@ -101,8 +121,6 @@ jobs:
             Select-Object -First 1
 
           if (-not $kmdf) {
-            # Current Windows 11 WDKs support KMDF 1.33. This fallback is only
-            # used if the runner layout does not expose the version folders.
             $kmdfVersion = '1.33'
           }
           else {
@@ -127,6 +145,9 @@ jobs:
 
           Copy-Item '.\windows\virtual-audio\driver\install-driver.ps1' "$dest\install-driver.ps1" -Force
 
+          $bridge = '.\build\vmic-bridge\Release\scrcpy-vmic-bridge.exe'
+          Copy-Item $bridge "$dest\scrcpy-vmic-bridge.exe" -Force
+
           $license = '.\windows\virtual-audio\driver\AUDIOMIRROR-LICENSE.md'
           if (Test-Path $license) { Copy-Item $license "$dest\AUDIOMIRROR-LICENSE.md" -Force }
 
@@ -147,8 +168,6 @@ jobs:
 
           Export-Certificate -Cert $cert -FilePath "$dest\scrcpy-vmic-test.cer" -Force | Out-Null
 
-          # Trust only on this ephemeral CI runner so SignTool verification can
-          # validate the self-signed development certificate.
           Import-Certificate -FilePath "$dest\scrcpy-vmic-test.cer" -CertStoreLocation 'Cert:\LocalMachine\Root' | Out-Null
           Import-Certificate -FilePath "$dest\scrcpy-vmic-test.cer" -CertStoreLocation 'Cert:\LocalMachine\TrustedPublisher' | Out-Null
 
@@ -220,10 +239,15 @@ jobs:
             scrcpy-vmic.cat
             scrcpy-vmic-test.cer
             install-driver.ps1
+            scrcpy-vmic-bridge.exe
 
           Expected endpoints:
             Capture:     scrcpy Virtual Microphone
             Render/feed: scrcpy Virtual Microphone Feed
+
+          After the virtual audio device is installed and scrcpy is producing
+          microphone PCM, run:
+            .\scrcpy-vmic-bridge.exe "scrcpy Virtual Microphone Feed"
 
           The certificate is unique to this CI run. Trust it only on machines
           where you intentionally want to test this development driver.
@@ -237,7 +261,8 @@ jobs:
             'scrcpy-vmic.sys',
             'scrcpy-vmic.cat',
             'scrcpy-vmic-test.cer',
-            'install-driver.ps1'
+            'install-driver.ps1',
+            'scrcpy-vmic-bridge.exe'
           )) {
             if (-not (Test-Path (Join-Path $dest $required))) {
               throw "Required artifact file is missing: $required"
