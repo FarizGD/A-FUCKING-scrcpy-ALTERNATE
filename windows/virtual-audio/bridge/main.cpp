@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <cwchar>
 #include <iostream>
@@ -182,25 +183,46 @@ float readSample(const Mapping& mapping, uint64_t absoluteFrame, uint32_t channe
     return mapping.samples[static_cast<size_t>(ringFrame) * mapping.header->channels + channel];
 }
 
+float readResampledSample(const Mapping& mapping, double sourcePosition, uint32_t channel,
+                          uint64_t publishedTotal, uint32_t publishedWriteFrame) {
+    uint64_t frame0 = static_cast<uint64_t>(sourcePosition);
+    uint64_t frame1 = frame0 + 1;
+    if (frame1 >= publishedTotal) {
+        frame1 = frame0;
+    }
+
+    float a = readSample(mapping, frame0, channel, publishedTotal, publishedWriteFrame);
+    if (frame1 == frame0) {
+        return a;
+    }
+
+    float b = readSample(mapping, frame1, channel, publishedTotal, publishedWriteFrame);
+    float fraction = static_cast<float>(sourcePosition - static_cast<double>(frame0));
+    return a + (b - a) * fraction;
+}
+
 void writeOutputFrame(BYTE* dst, UINT32 frameIndex, const WAVEFORMATEX* mix,
-                      const Mapping& mapping, uint64_t sourceFrame,
+                      const Mapping& mapping, double sourcePosition,
                       uint64_t publishedTotal, uint32_t publishedWriteFrame) {
     const uint32_t inChannels = mapping.header->channels;
     const uint32_t outChannels = mix->nChannels;
 
     auto sourceForChannel = [&](uint32_t outChannel) -> float {
         if (inChannels == 1) {
-            return readSample(mapping, sourceFrame, 0, publishedTotal, publishedWriteFrame);
+            return readResampledSample(mapping, sourcePosition, 0,
+                                       publishedTotal, publishedWriteFrame);
         }
         if (outChannels == 1) {
             float sum = 0.0f;
             for (uint32_t ch = 0; ch < inChannels; ++ch) {
-                sum += readSample(mapping, sourceFrame, ch, publishedTotal, publishedWriteFrame);
+                sum += readResampledSample(mapping, sourcePosition, ch,
+                                           publishedTotal, publishedWriteFrame);
             }
             return sum / static_cast<float>(inChannels);
         }
         uint32_t inChannel = std::min(outChannel, inChannels - 1);
-        return readSample(mapping, sourceFrame, inChannel, publishedTotal, publishedWriteFrame);
+        return readResampledSample(mapping, sourcePosition, inChannel,
+                                   publishedTotal, publishedWriteFrame);
     };
 
     if (isFloatFormat(mix)) {
@@ -246,20 +268,21 @@ int run(const std::wstring& deviceSubstring) {
         return 5;
     }
 
-    if (mix->nSamplesPerSec != mapping.header->sampleRate) {
-        std::wcerr << L"Sample-rate mismatch: scrcpy=" << mapping.header->sampleRate
-                   << L", endpoint=" << mix->nSamplesPerSec
-                   << L". Resampling is not implemented yet.\n";
-        CoTaskMemFree(mix);
-        client->Release();
-        return 6;
-    }
-
     if (!isFloatFormat(mix) && !isPcm16Format(mix)) {
         std::wcerr << L"Endpoint mix format is not float32 or PCM16.\n";
         CoTaskMemFree(mix);
         client->Release();
         return 7;
+    }
+
+    const double sourceFramesPerOutputFrame =
+        static_cast<double>(mapping.header->sampleRate) /
+        static_cast<double>(mix->nSamplesPerSec);
+
+    if (mix->nSamplesPerSec != mapping.header->sampleRate) {
+        std::wcout << L"Resampling scrcpy " << mapping.header->sampleRate
+                   << L" Hz -> endpoint " << mix->nSamplesPerSec
+                   << L" Hz (linear interpolation).\n";
     }
 
     constexpr REFERENCE_TIME bufferDuration = 1000000; // 100 ms
@@ -283,7 +306,7 @@ int run(const std::wstring& deviceSubstring) {
         return 9;
     }
 
-    uint64_t readTotal = static_cast<uint64_t>(mapping.header->totalFrames);
+    double sourcePosition = static_cast<double>(mapping.header->totalFrames);
 
     hr = client->Start();
     if (FAILED(hr)) {
@@ -322,17 +345,19 @@ int run(const std::wstring& deviceSubstring) {
         uint64_t publishedTotal = static_cast<uint64_t>(mapping.header->totalFrames);
         uint32_t publishedWrite = static_cast<uint32_t>(mapping.header->writeFrame);
         uint64_t capacity = mapping.header->capacityFrames;
+        uint64_t oldestAvailable = publishedTotal > capacity ? publishedTotal - capacity : 0;
 
-        if (publishedTotal > readTotal + capacity) {
-            readTotal = publishedTotal - capacity;
+        if (sourcePosition < static_cast<double>(oldestAvailable)) {
+            sourcePosition = static_cast<double>(oldestAvailable);
         }
 
-        uint64_t ready = publishedTotal - readTotal;
-        UINT32 copyFrames = static_cast<UINT32>(std::min<uint64_t>(available, ready));
-
-        for (UINT32 i = 0; i < copyFrames; ++i) {
-            writeOutputFrame(out, i, mix, mapping, readTotal + i,
+        UINT32 copyFrames = 0;
+        while (copyFrames < available
+                && sourcePosition < static_cast<double>(publishedTotal)) {
+            writeOutputFrame(out, copyFrames, mix, mapping, sourcePosition,
                              publishedTotal, publishedWrite);
+            sourcePosition += sourceFramesPerOutputFrame;
+            ++copyFrames;
         }
 
         size_t frameBytes = mix->nBlockAlign;
@@ -341,7 +366,6 @@ int run(const std::wstring& deviceSubstring) {
                        static_cast<size_t>(available - copyFrames) * frameBytes);
         }
 
-        readTotal += copyFrames;
         hr = render->ReleaseBuffer(available, 0);
         if (FAILED(hr)) {
             break;
@@ -362,7 +386,7 @@ int run(const std::wstring& deviceSubstring) {
 int wmain(int argc, wchar_t** argv) {
     if (argc != 2) {
         std::wcerr << L"Usage: scrcpy-vmic-bridge.exe \"render endpoint name substring\"\n"
-                   << L"Example: scrcpy-vmic-bridge.exe \"scrcpy Virtual Microphone Feed\"\n";
+                   << L"Example: scrcpy-vmic-bridge.exe \"scrcpy Virtual Audio Device\"\n";
         return 1;
     }
 
